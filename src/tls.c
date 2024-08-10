@@ -34,6 +34,7 @@
 #include <string.h> /* strncpy() */
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <arpa/inet.h> /* hstons() */
 #include "tls.h"
 #include "protocol.h"
 #include "logger.h"
@@ -47,10 +48,10 @@
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
 #endif
 
-
-static int parse_tls_header(const uint8_t*, size_t, char **);
-static int parse_extensions(const uint8_t*, size_t, char **);
-static int parse_server_name_extension(const uint8_t*, size_t, char **);
+static void modify_tls_header(uint8_t*, size_t, char **, size_t*);
+static int parse_tls_header(const uint8_t*, size_t, char **, size_t*);
+static int parse_extensions(const uint8_t*, size_t, char **, size_t*);
+static int parse_server_name_extension(const uint8_t*, size_t, char **, size_t*);
 
 
 static const char tls_alert[] = {
@@ -63,11 +64,24 @@ static const char tls_alert[] = {
 const struct Protocol *const tls_protocol = &(struct Protocol){
     .name = "tls",
     .default_port = 443,
-    .parse_packet = (int (*const)(const char *, size_t, char **))&parse_tls_header,
+    .parse_packet = (int (*const)(const char *, size_t, char **, size_t*))&parse_tls_header,
+    .modify_packet = (void (*const)(char*, size_t, char **, size_t*))&modify_tls_header,
     .abort_message = tls_alert,
     .abort_message_len = sizeof(tls_alert)
 };
 
+static void
+modify_tls_header(uint8_t *data, size_t data_len, char **hostname, size_t* modify_pos) {
+    debug("Received SNI %s.", *hostname);
+    size_t sni_split_pos = *modify_pos + 1;
+    memmove(data + 5 + sni_split_pos, data + sni_split_pos, data_len - 5 - sni_split_pos);
+    memcpy(data + sni_split_pos, data, 5);
+    size_t part1_len = sni_split_pos - 5;
+    size_t record_length = (uint16_t)((data[3] << 8) + (uint8_t)data[4]);
+    size_t part2_len = record_length - part1_len;
+    *(uint16_t *)(data + 3) = htons(part1_len);
+    *(uint16_t *)(data + sni_split_pos + 3) = htons(part2_len);
+}
 
 /* Parse a TLS packet for the Server Name Indication extension in the client
  * hello handshake, returning the first servername found (pointer to static
@@ -83,7 +97,7 @@ const struct Protocol *const tls_protocol = &(struct Protocol){
  *  < -4 - Invalid TLS client hello
  */
 static int
-parse_tls_header(const uint8_t *data, size_t data_len, char **hostname) {
+parse_tls_header(const uint8_t *data, size_t data_len, char **hostname, size_t* modify_pos) {
     uint8_t tls_content_type;
     uint8_t tls_version_major;
     uint8_t tls_version_minor;
@@ -184,14 +198,16 @@ parse_tls_header(const uint8_t *data, size_t data_len, char **hostname) {
 
     if (pos + len > data_len)
         return -5;
-    return parse_extensions(data + pos, len, hostname);
+    *modify_pos = pos;
+    return parse_extensions(data + pos, len, hostname, modify_pos);
 }
 
 static int
-parse_extensions(const uint8_t *data, size_t data_len, char **hostname) {
+parse_extensions(const uint8_t *data, size_t data_len, char **hostname, size_t* modify_pos) {
     size_t pos = 0;
     size_t len;
-
+    size_t old_pos = *modify_pos;
+    *modify_pos = 0;
     /* Parse each 4 bytes for the extension header */
     while (pos + 4 <= data_len) {
         /* Extension Length */
@@ -204,7 +220,8 @@ parse_extensions(const uint8_t *data, size_t data_len, char **hostname) {
                our state and move p to beinnging of the extension here */
             if (pos + 4 + len > data_len)
                 return -5;
-            return parse_server_name_extension(data + pos + 4, len, hostname);
+            *modify_pos = pos + 4 + old_pos;
+            return parse_server_name_extension(data + pos + 4, len, hostname, modify_pos);
         }
         pos += 4 + len; /* Advance to the next extension header */
     }
@@ -217,10 +234,11 @@ parse_extensions(const uint8_t *data, size_t data_len, char **hostname) {
 
 static int
 parse_server_name_extension(const uint8_t *data, size_t data_len,
-        char **hostname) {
+        char **hostname, size_t* modify_pos) {
     size_t pos = 2; /* skip server name list length */
     size_t len;
-
+    size_t old_pos = *modify_pos;
+    *modify_pos = 0;
     while (pos + 3 < data_len) {
         len = ((size_t)data[pos + 1] << 8) +
             (size_t)data[pos + 2];
@@ -239,7 +257,7 @@ parse_server_name_extension(const uint8_t *data, size_t data_len,
                 strncpy(*hostname, (const char *)(data + pos + 3), len);
 
                 (*hostname)[len] = '\0';
-
+                *modify_pos = pos + 3 + old_pos;
                 return len;
             default:
                 debug("Unknown server name extension name type: %" PRIu8,

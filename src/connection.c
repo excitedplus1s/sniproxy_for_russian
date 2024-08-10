@@ -277,7 +277,7 @@ connection_cb(struct ev_loop *loop, struct ev_io *w, int revents) {
             close_socket(con, loop);
         }
     }
-
+    
     /* Handle any state specific logic, note we may transition through several
      * states during a single call */
     if (is_client && con->state == ACCEPTED)
@@ -442,8 +442,21 @@ parse_client_request(struct Connection *con) {
 
     payload += con->header_len;
     payload_len -= con->header_len;
-
-    int result = con->listener->protocol->parse_packet(payload, payload_len, &hostname);
+    size_t modify_pos = 0;
+    int result = con->listener->protocol->parse_packet(payload, payload_len, &hostname, &modify_pos);
+    if (result > 0 && con->listener->protocol->modify_packet && modify_pos > 0) {
+        char *modify_payload;
+        size_t modify_payload_len = buffer_coalesce(con->client.buffer, (const void **)&modify_payload);
+        modify_payload_len = buffer_resize(con->client.buffer, modify_payload_len + 5);
+        con->client.buffer->len += 5;
+        con->client.buffer->rx_bytes += 5;
+        modify_payload_len = buffer_coalesce(con->client.buffer, (const void **)&modify_payload);
+        if (modify_payload_len <= con->header_len)
+            return;
+        modify_payload += con->header_len;
+        modify_payload_len -= con->header_len;
+        con->listener->protocol->modify_packet(modify_payload, modify_payload_len, &hostname, &modify_pos);
+    }
     if (result < 0) {
         char client[INET6_ADDRSTRLEN + 8];
 

@@ -34,7 +34,7 @@
 #define SERVER_NAME_LEN 256
 
 
-static int parse_http_header(const char *, size_t, char **);
+static int parse_http_header(const char *, size_t, char **, size_t*);
 static int get_header(const char *, const char *, size_t, char **);
 static size_t next_header(const char **, size_t *);
 
@@ -49,6 +49,7 @@ const struct Protocol *const http_protocol = &(struct Protocol){
     .name = "http",
     .default_port = 80,
     .parse_packet = &parse_http_header,
+    .modify_packet = NULL,
     .abort_message = http_503,
     .abort_message_len = sizeof(http_503) - 1,
 };
@@ -67,7 +68,8 @@ const struct Protocol *const http_protocol = &(struct Protocol){
  *
  */
 static int
-parse_http_header(const char* data, size_t data_len, char **hostname) {
+parse_http_header(const char* data, size_t data_len, char **hostname, size_t* modify_pos) {
+    (void)modify_pos;
     int result, i;
 
     if (hostname == NULL)
